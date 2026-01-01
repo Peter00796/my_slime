@@ -532,11 +532,7 @@ def policy_loss_function(
         ppo_kl = old_log_probs - log_probs
 
     pg_loss, pg_clipfrac = compute_policy_loss(ppo_kl, advantages, args.eps_clip, args.eps_clip_high)
-
-    if args.use_opsm:
-        pg_loss = pg_loss * opsm_mask
-
-    # Apply off-policy correction using importance sampling if enabled
+        # Apply off-policy correction using importance sampling if enabled
     if args.get_mismatch_metrics or args.use_tis:
         # NOTE:
         # `tis_func` may apply rejection-sampling style masking (RS) and return `modified_response_masks`.
@@ -547,6 +543,20 @@ def policy_loss_function(
         # tokens are excluded from the denominator and the metric can be artificially driven to 0.
         # Keep a copy of the original reducer (based on `batch["loss_masks"]`) for metric aggregation.
         sum_of_sample_mean_for_mismatch_metrics = sum_of_sample_mean
+
+    if args.use_tis:
+        assert "rollout_log_probs" in batch, "rollout_log_probs must be provided for TIS"
+        ois = (-ppo_kl).exp()
+        tis_kwargs = {
+            "args": args,
+            "pg_loss": pg_loss,
+            "train_log_probs": batch["log_probs"],
+            "rollout_log_probs": batch["rollout_log_probs"],
+            "loss_masks": batch["loss_masks"],
+            "total_lengths": total_lengths,
+            "response_lengths": response_lengths,
+        }
+        # ... 下面继续保持原来 upstream 的 tis_func 调用逻辑 ...
 
         assert "rollout_log_probs" in batch, "rollout_log_probs must be provided for TIS"
 
@@ -630,6 +640,7 @@ def policy_loss_function(
         "pg_loss": pg_loss.clone().detach(),
         "entropy_loss": entropy_loss.clone().detach(),
         "pg_clipfrac": pg_clipfrac.clone().detach(),
+        "offlineness/ess": normalized_ess.clone().detach(),
         "ppo_kl": ppo_kl.clone().detach(),
     }
 

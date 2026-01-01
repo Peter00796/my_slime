@@ -16,6 +16,7 @@ from slime.utils.tracking_utils import init_tracking
 def train(args):
     configure_logger()
     # allocate the GPUs
+    print("LOADING MODIFIED SLIME!!! YOU HAVE TO SEE THIS FOR THE LOADING TO WORK")
     pgs = create_placement_groups(args)
     init_tracking(args)
 
