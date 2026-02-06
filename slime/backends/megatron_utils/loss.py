@@ -640,7 +640,6 @@ def policy_loss_function(
         "pg_loss": pg_loss.clone().detach(),
         "entropy_loss": entropy_loss.clone().detach(),
         "pg_clipfrac": pg_clipfrac.clone().detach(),
-        "offlineness/ess": normalized_ess.clone().detach(),
         "ppo_kl": ppo_kl.clone().detach(),
     }
 
