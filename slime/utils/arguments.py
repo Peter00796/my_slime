@@ -889,6 +889,12 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 help="Whether to calculate the mismatch metrics.",
             )
             parser.add_argument(
+                "--enable-offlineness-metrics",
+                action="store_true",
+                default=False,
+                help="Enable offlineness metrics monitoring (ESS ratio, Mismatch KL, clip fraction).",
+            )
+            parser.add_argument(
                 "--reset-optimizer-states",
                 action="store_true",
                 default=False,
@@ -1533,6 +1539,17 @@ def parse_args(add_custom_arguments=None):
             )
 
     sglang_validate_args(args)
+
+    # Apply offlineness metrics monkey patch if enabled
+    if getattr(args, "enable_offlineness_metrics", False):
+        try:
+            from patches.offlineness_monitor import apply_patch
+
+            apply_patch()
+            logger.info("Offlineness metrics monitoring enabled via monkey patch.")
+        except ImportError as e:
+            logger.error(f"Failed to import offlineness monitor patch: {e}")
+            raise
 
     return args
 
