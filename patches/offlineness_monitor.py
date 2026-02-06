@@ -105,9 +105,10 @@ def patched_policy_loss_function(
     offlineness_metrics = compute_offlineness_metrics(log_probs, old_log_probs, loss_masks)
     
     # Aggregate metrics using sum_of_sample_mean and add to reported_loss
-    for key, value in offlineness_metrics.items():
-        if value.numel() > 0:  # Only add if tensor is not empty
-            reported_loss[key] = sum_of_sample_mean(value).clone().detach()
+    if offlineness_metrics:  # Only process if metrics were computed
+        for key, value in offlineness_metrics.items():
+            if value.numel() > 0:  # Only add if tensor is not empty
+                reported_loss[key] = sum_of_sample_mean(value).clone().detach()
     
     return loss, reported_loss
 
