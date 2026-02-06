@@ -388,6 +388,55 @@ def compute_advantages_and_returns(args: Namespace, rollout_data: RolloutBatch) 
     rollout_data["returns"] = returns
 
 
+def compute_offlineness_metrics(
+    log_probs: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    loss_masks: torch.Tensor,
+) -> dict[str, torch.Tensor]:
+    """Computes ESS and Mismatch KL for monitoring data staleness.
+    
+    Args:
+        log_probs: Current policy log probabilities (concatenated).
+        old_log_probs: Old policy log probabilities (concatenated).
+        loss_masks: Loss masks (concatenated).
+        
+    Returns:
+        Dict with keys: "offlineness/ess_ratio", "offlineness/mismatch_kl",
+        "offlineness/clip_frac_02", "offlineness/max_ratio".
+    """
+    with torch.no_grad():
+        # Flatten and filter by mask
+        mask = loss_masks.bool().view(-1)
+        valid_log_probs = log_probs.view(-1)[mask]
+        valid_old_log_probs = old_log_probs.view(-1)[mask]
+        
+        if valid_log_probs.numel() == 0:
+            return {}
+
+        # Calculate Ratio
+        log_ratio = valid_log_probs - valid_old_log_probs
+        ratio = torch.exp(log_ratio)
+
+        # 1. ESS Calculation: (Sum w)^2 / Sum (w^2)
+        numerator = ratio.sum() ** 2
+        denominator = (ratio ** 2).sum() + 1e-8
+        ess = numerator / denominator
+        ess_ratio = ess / ratio.numel()
+
+        # 2. Mismatch KL (k3 estimator): 0.5 * (r-1)^2
+        mismatch_kl = 0.5 * ((ratio - 1) ** 2).mean()
+
+        # 3. Clip Fraction (Standard PPO bounds [0.8, 1.2])
+        clip_frac = ((ratio < 0.8) | (ratio > 1.2)).float().mean()
+
+    return {
+        "offlineness/ess_ratio": ess_ratio,
+        "offlineness/mismatch_kl": mismatch_kl,
+        "offlineness/clip_frac_02": clip_frac,
+        "offlineness/max_ratio": ratio.max(),
+    }
+
+
 def vanilla_tis_function(
     args,
     *,
@@ -635,6 +684,13 @@ def policy_loss_function(
         rollout_log_probs = torch.cat(batch["rollout_log_probs"], dim=0)
         train_rollout_logprob_abs_diff = sum_of_sample_mean((old_log_probs - rollout_log_probs).abs())
 
+    # Compute offlineness metrics if enabled
+    if getattr(args, "enable_offlineness_metrics", False):
+        loss_masks_cat = torch.cat(batch["loss_masks"], dim=0)
+        offlineness_metrics = compute_offlineness_metrics(log_probs, old_log_probs, loss_masks_cat)
+    else:
+        offlineness_metrics = {}
+
     reported_loss = {
         "loss": loss.clone().detach(),
         "pg_loss": pg_loss.clone().detach(),
@@ -660,6 +716,12 @@ def policy_loss_function(
 
     if args.use_opsm:
         reported_loss["opsm_clipfrac"] = opsm_clipfrac
+
+    # Add offlineness metrics to reported_loss
+    if offlineness_metrics:
+        for key, value in offlineness_metrics.items():
+            if value.numel() > 0:  # Only add if tensor is not empty
+                reported_loss[key] = value.clone().detach()
 
     return loss, reported_loss
 

@@ -1398,17 +1398,6 @@ def parse_args(add_custom_arguments=None):
 
     sglang_validate_args(args)
 
-    # Apply offlineness metrics monkey patch if enabled
-    if getattr(args, "enable_offlineness_metrics", False):
-        try:
-            from patches.offlineness_monitor import apply_patch
-
-            apply_patch()
-            logger.info("Offlineness metrics monitoring enabled via monkey patch.")
-        except ImportError as e:
-            logger.error(f"Failed to import offlineness monitor patch: {e}")
-            raise
-
     return args
 
 
