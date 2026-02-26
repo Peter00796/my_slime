@@ -423,6 +423,16 @@ def compute_offlineness_metrics(
         ess = numerator / denominator
         ess_ratio = ess / ratio.numel()
 
+        # DEBUG: print ratio distribution to diagnose ESS value
+        import torch.distributed as dist
+        if not dist.is_initialized() or dist.get_rank() == 0:
+            print(f"[ESS DEBUG] N={ratio.numel()}, ratio min={ratio.min().item():.6f}, "
+                  f"max={ratio.max().item():.6f}, mean={ratio.mean().item():.6f}, "
+                  f"std={ratio.std().item():.6f}, ESS={ess.item():.2f}, "
+                  f"ESS_ratio={ess_ratio.item():.6f}, "
+                  f"log_ratio min={log_ratio.min().item():.4f}, max={log_ratio.max().item():.4f}",
+                  flush=True)
+
         # 2. Mismatch KL (k3 estimator): 0.5 * (r-1)^2
         mismatch_kl = 0.5 * ((ratio - 1) ** 2).mean()
 
