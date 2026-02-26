@@ -41,6 +41,13 @@ User: muruzhan
 ```
 **Requirement**: Mac VPN must be ON, or use internal IP 10.72.0.16.
 
+### Git Workflow (Local ↔ Cluster)
+- Cluster remote name is `Offline` (not `origin`; `origin` = upstream THUDM/slime)
+- Cluster remote URL: `git@github.com:Peter00796/my_slime.git` (SSH)
+- **Workflow**: local edit → `git commit` → `git push origin Offline/Working` → SSH to cluster → `cd slime_env/slime && git pull Offline Offline/Working`
+- Cluster SSH key (`~/.ssh/id_ed25519`, passphrase removed) is registered on GitHub
+- Cluster `~/.ssh/config` has a `Host github.com` entry pointing to `id_ed25519`
+
 ### Working Directory
 ```
 /project2/swabhas_1625/muruzhan/yanxinpeng
@@ -67,10 +74,18 @@ yanxinpeng/
 └── wandb/                # WandB logs
 ```
 
-### Resource Request (srun)
+### Resource Request
+**Interactive (srun)**:
 ```bash
 srun --partition=nlp --gres=gpu:4 --cpus-per-task=8 --mem=64G --time=02:00:00 --pty bash
 ```
+
+**Batch (sbatch)** — preferred for autonomous runs:
+```bash
+sbatch /project2/swabhas_1625/muruzhan/yanxinpeng/submit_fixed_ess.sh
+```
+**NOTE**: Node c05-05 has broken CUDA drivers (Error 802). Always `--exclude=c05-05` in sbatch scripts.
+
 Always run `squeue -u muruzhan` first. If a node is already allocated, `ssh <node>` directly.
 
 ### Environment Init (MUST run on every compute node)
