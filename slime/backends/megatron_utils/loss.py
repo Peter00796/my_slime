@@ -687,7 +687,14 @@ def policy_loss_function(
     # Compute offlineness metrics if enabled
     if getattr(args, "enable_offlineness_metrics", False):
         loss_masks_cat = torch.cat(batch["loss_masks"], dim=0)
-        offlineness_metrics = compute_offlineness_metrics(log_probs, old_log_probs, loss_masks_cat)
+        # Use rollout_log_probs (from data generation time) to measure true offlineness.
+        # batch["log_probs"] is from the start of this PPO epoch — comparing against it
+        # only measures within-epoch drift, which is near-zero and uninformative.
+        if "rollout_log_probs" in batch and batch["rollout_log_probs"]:
+            offlineness_old = torch.cat(batch["rollout_log_probs"], dim=0)
+        else:
+            offlineness_old = old_log_probs
+        offlineness_metrics = compute_offlineness_metrics(log_probs, offlineness_old, loss_masks_cat)
     else:
         offlineness_metrics = {}
 

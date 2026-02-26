@@ -73,9 +73,12 @@ def patched_policy_loss_function(
     loss, reported_loss = _original_policy_loss_function(args, batch, logits, sum_of_sample_mean)
     
     # Compute offlineness metrics
-    # We need to get the concatenated log_probs and old_log_probs
-    # Extract old_log_probs from batch
-    old_log_probs_list = batch["rollout_log_probs"] if args.use_rollout_logprobs else batch["log_probs"]
+    # Always use rollout_log_probs (from data generation time) to measure true offlineness.
+    # batch["log_probs"] is from the start of this PPO epoch — near-identical to current policy.
+    if "rollout_log_probs" in batch and batch["rollout_log_probs"]:
+        old_log_probs_list = batch["rollout_log_probs"]
+    else:
+        old_log_probs_list = batch["log_probs"]
     
     # Recompute current log_probs from logits
     response_lengths = batch["response_lengths"]
