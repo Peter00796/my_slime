@@ -834,6 +834,17 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 help="Enable offlineness metrics monitoring (ESS ratio, Mismatch KL, clip fraction).",
             )
             parser.add_argument(
+                "--ppo-epochs",
+                type=int,
+                default=1,
+                help=(
+                    "Number of PPO epochs per rollout. Each epoch makes a full pass over the "
+                    "rollout data. At the start of each epoch (after the first), log_probs are "
+                    "recomputed to reflect the updated policy. Higher values increase data reuse "
+                    "but may cause off-policy drift. Default: 1 (standard single-pass GRPO)."
+                ),
+            )
+            parser.add_argument(
                 "--use-rollout-logprobs",
                 action="store_true",
                 default=False,

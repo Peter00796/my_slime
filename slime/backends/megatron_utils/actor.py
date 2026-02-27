@@ -441,18 +441,40 @@ class MegatronTrainRayActor(TrainRayActor):
 
             log_rollout_data(rollout_id, self.args, rollout_data)
 
-            # Train
-            if self.args.use_routing_replay:
-                os.environ["ROUTING_REPLAY_STAGE"] = "replay_backward"
-            with timer("actor_train"):
-                train(
-                    rollout_id,
-                    self.model,
-                    self.optimizer,
-                    self.opt_param_scheduler,
-                    data_iterator,
-                    num_microbatches,
-                )
+            # Train — loop over PPO epochs for data reuse
+            ppo_epochs = getattr(self.args, "ppo_epochs", 1)
+            if ppo_epochs > 1:
+                logger.info(f"PPO epochs: {ppo_epochs} (rollout {rollout_id})")
+            for ppo_epoch in range(ppo_epochs):
+                # For epochs after the first, recompute log_probs under the
+                # updated policy so the PPO importance ratio stays bounded.
+                if ppo_epoch > 0:
+                    logger.info(f"PPO epoch {ppo_epoch}/{ppo_epochs} — recomputing log_probs")
+                    for di in data_iterator:
+                        di.reset()
+                    self._switch_model("actor")
+                    rollout_data.update(
+                        self.compute_log_prob(
+                            data_iterator,
+                            num_microbatches,
+                            store_prefix="",
+                        )
+                    )
+                    # Reset iterators again before training
+                    for di in data_iterator:
+                        di.reset()
+
+                if self.args.use_routing_replay:
+                    os.environ["ROUTING_REPLAY_STAGE"] = "replay_backward"
+                with timer("actor_train"):
+                    train(
+                        rollout_id,
+                        self.model,
+                        self.optimizer,
+                        self.opt_param_scheduler,
+                        data_iterator,
+                        num_microbatches,
+                    )
 
             self.prof.step(rollout_id=rollout_id)
 
