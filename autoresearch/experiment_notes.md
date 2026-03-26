@@ -126,5 +126,18 @@ Note: First two submissions (3044652, 3044656) failed due to `num_rollout=200 < 
 **Hypothesis**: The prescriptive fix at lr=1e-5 is durably stable. Entropy continues to increase moderately and reward improves over 500 rollouts without collapse.
 **Success criteria**: No reward degradation after 500 rollouts. Entropy in 0.5-2.0 range, stable or slowly increasing. ESS stays >0.99.
 
+**Submitted**: 2026-03-26, SLURM job 3045099 (c05-02), then 3045964 (resubmit with 128GB)
+**Config**: `run-qwen2.5-1.5B-auto-003.sh` — proven fix (lr=1e-5, ε=0.05, stale logprobs, N=8)
+**Status**: RUNNING (resubmitted after OOM at 93 rollouts)
+
+### Partial Results (93 rollouts, 800-893, before OOM)
+- **ESS**: Rock solid 0.997+ throughout
+- **Entropy**: Healthy range 0.09-1.18, showing the characteristic beneficial increase
+- **max_ratio**: 1.3-2.1, extremely well bounded
+- **pg_clipfrac**: 0.01-0.07, actively clipping
+- **Reward trajectory**: 0.125 (rollout 815) → 0.305 peak (rollout 834) → cycling 0.10-0.27
+- **No degradation**: No signs of collapse, degeneration, or capability loss over 93 rollouts
+- **OOM**: Host memory killed at 1h47m. Infrastructure issue, not training problem. Resubmitted with 128GB.
+
 ### NEXT PLANNED EXPERIMENT:
-Experiment 003: `--lr 1e-5 --eps-clip 0.05 --eps-clip-high 0.05 --use-rollout-logprobs --num-steps-per-rollout 8 --num-rollout 1300 --no-load-optim` (500 rollouts from checkpoint 800)
+Continue monitoring 003. If 500 rollouts complete successfully, the durability hypothesis is confirmed → Finding 15. Then try N=16 rollout steps.
