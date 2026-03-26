@@ -80,9 +80,51 @@ Note: First two submissions (3044652, 3044656) failed due to `num_rollout=200 < 
 
 ## Experiment 002 — Tighter Clipping (ε=0.02) at lr=5e-5
 
+**Submitted**: 2026-03-26, SLURM job 3044925, node c06-01
 **Config**: Same as 001 but `--eps-clip 0.02 --eps-clip-high 0.02`
-**Hypothesis**: Tighter clipping can prevent entropy explosion at lr=5e-5 while preserving the beneficial entropy increase. If ε=0.02 is sufficient, it demonstrates the fix is generalizable with LR-proportional ε.
+**Hypothesis**: Tighter clipping can prevent entropy explosion at lr=5e-5 while preserving the beneficial entropy increase.
 **Success criteria**: Entropy increases moderately (0.3-0.8 range, not >1.5), ESS stays >0.95, reward improves, no degeneration.
 
+**Status**: COMPLETED — REJECTED
+
+### Results
+**Trajectory** (rollouts 800-846, ~46 rollouts, ~48 min):
+- **Rollout 800-810**: ESS 0.989-0.999, entropy 0.08-0.35, pg_clipfrac 0.02-0.14. Controlled.
+- **Rollout 827-831**: raw_reward 0.015-0.055, truncated 16-37%. Already below baseline (0.13-0.15).
+- **Rollout 842-846**: raw_reward 0.0-0.023, truncated 52-76%. Degrading.
+- **Step 6775**: ESS 0.985, max_ratio 4.7, entropy 0.21.
+
+**Key finding**: Tighter clipping (ε=0.02) **delays but does not prevent** degradation at lr=5e-5. The model's solve rate drops 0.05→0.008 over 46 rollouts. Response lengths increase (truncation climbs), suggesting the model is generating longer but less useful outputs. Entropy stays controlled (0.08-0.38) but the model's fundamental capability degrades anyway.
+
+**Critical insight**: The problem at lr=5e-5 is NOT just entropy explosion (which tighter clipping can contain). The model degrades even with controlled entropy. The fundamental issue is that lr=5e-5 causes too-large policy updates per step, and the accumulated drift — even when individually clipped — moves the model away from useful math reasoning. The prescriptive fix requires LR ≤ ~1e-5 to work, regardless of ε.
+
+### Cumulative Findings (Experiments 001-002)
+- **Finding 13**: lr=5e-5 breaks the prescriptive fix regardless of ε. At ε=0.05: entropy explosion → mode collapse in ~50 rollouts. At ε=0.02: controlled entropy but capability degradation → reward collapse in ~46 rollouts.
+- **Finding 14**: The prescriptive fix has a narrow effective LR band (works at 1e-5, fails at 5e-5). The boundary is likely lr ∈ [1e-5, 3e-5].
+
+### Self-Debate Before Next Experiment
+
+**Option A**: Try lr=2e-5 to find the exact boundary.
+- Pro: Confirms Finding 14, narrows the range
+- Con: Still just mapping the LR boundary, which we already know is narrow
+
+**Option B**: Try the proven fix (lr=1e-5, ε=0.05) for 500+ rollouts to test durability.
+- Pro: Tests whether the entropy increase at lr=1e-5 eventually plateaus or keeps rising to collapse
+- Con: Long experiment, but high information value — we need to know if the fix is truly stable long-term
+
+**Option C**: Try N=16 rollout steps at lr=1e-5 with the fix.
+- Pro: Tests a new dimension entirely, not just LR variations
+- Con: If N=8 was the boundary, N=16 might collapse quickly
+
+**Decision**: Option B. We've established that higher LR breaks the fix. The most important open question now is durability — does the proven fix at lr=1e-5 sustain over hundreds of rollouts or does it eventually degrade like the higher LR experiments? This is the key claim for the paper: that the fix is a stable long-term solution.
+
+---
+
+## Experiment 003 — Prescriptive Fix Durability (lr=1e-5, ε=0.05, 500 rollouts)
+
+**Config**: Base prescriptive fix config (same as ablation 6, stale+clip005) but extended to 500 rollouts (num_rollout=1300, starting from checkpoint 800).
+**Hypothesis**: The prescriptive fix at lr=1e-5 is durably stable. Entropy continues to increase moderately and reward improves over 500 rollouts without collapse.
+**Success criteria**: No reward degradation after 500 rollouts. Entropy in 0.5-2.0 range, stable or slowly increasing. ESS stays >0.99.
+
 ### NEXT PLANNED EXPERIMENT:
-Experiment 002: `--lr 5e-5 --eps-clip 0.02 --eps-clip-high 0.02 --use-rollout-logprobs --num-steps-per-rollout 8 --num-rollout 1000 --no-load-optim`
+Experiment 003: `--lr 1e-5 --eps-clip 0.05 --eps-clip-high 0.05 --use-rollout-logprobs --num-steps-per-rollout 8 --num-rollout 1300 --no-load-optim` (500 rollouts from checkpoint 800)
