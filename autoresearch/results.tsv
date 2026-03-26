@@ -1,1 +1,2 @@
 exp_id	hypothesis	config_changes	num_rollouts	final_ess	final_entropy	final_reward	final_pg_clipfrac	max_ratio	status	finding
+001	Prescriptive fix holds at lr=5e-5	lr=5e-5 use-rollout-logprobs eps-clip=0.05 steps=8	~50 (800-850)	0.927	1.89	0.0	0.06	8.5	rejected	Fix causes entropy explosion and model degeneration at lr=5e-5. Entropy rises 10x faster than lr=1e-5 but leads to repetitive n-n-n collapse with 0 reward by rollout 850. LR boundary is between 1e-5 and 5e-5.
