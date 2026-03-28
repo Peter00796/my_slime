@@ -1,0 +1,212 @@
+%% Sections 4, 5, and 6
+%% To be included in main paper via \input{sections4_5_6}
+
+\section{Activating Clipping: A Controlled Experiment}
+\label{sec:activating-clipping}
+
+The diagnosis in Section~\ref{sec:root-cause} suggests a straightforward intervention: replace the recomputed log-probability denominator with the stale rollout log-probabilities, reconnecting the importance ratio to the actual behavior policy.
+In this section, we implement this fix, evaluate it through a factorial design, and report both its short-horizon promise and its long-horizon limitations with full transparency.
+
+\subsection{Using Stale Rollout Log-Probabilities}
+\label{sec:stale-logprobs}
+
+We introduce a \texttt{--use-rollout-logprobs} flag that modifies the PPO loss computation.
+Under the standard implementation, the importance ratio denominator uses \texttt{batch["log\_probs"]}---log-probabilities recomputed from the current policy at each training step.
+Our modification substitutes \texttt{batch["rollout\_log\_probs"]}, the log-probabilities recorded at rollout generation time, so that
+\begin{equation}
+\label{eq:stale-ratio}
+r_t(\theta) = \frac{\pi_\theta(a_t \mid s_t)}{\pi_{\text{rollout}}(a_t \mid s_t)},
+\end{equation}
+where $\pi_{\text{rollout}}$ is the policy that actually generated the training data.
+This is a one-line change in the loss computation, but it fundamentally alters the semantics of the importance ratio: $r_t(\theta)$ now measures the full divergence between the current policy and the data-generating policy, rather than the negligible divergence accumulated within a single optimization step.
+
+To prevent the reactivated importance ratio from driving unconstrained policy updates, we pair this modification with a tight clip threshold $\varepsilon = 0.05$, substantially more restrictive than the standard $\varepsilon = 0.2$.
+The rationale is that once the importance ratio faithfully reflects policy drift, even modest drift can produce large ratio deviations, and the trust region must tighten accordingly.
+
+\subsection{The 2$\times$2 Factorial Design}
+\label{sec:factorial}
+
+To disentangle the contributions of stale log-probabilities and tight clipping, we conduct a $2 \times 2$ factorial experiment crossing two factors: log-probability reference $\in \{\text{fresh}, \text{stale}\}$ and clip threshold $\in \{\varepsilon = 0.05, \varepsilon = 10^6 \text{ (effectively no clip)}\}$.
+All conditions use $\text{lr} = 10^{-5}$ with \texttt{--num-steps-per-rollout}$\,{=}\,8$ on the same Qwen2.5-Math-1.5B checkpoint.
+Table~\ref{tab:factorial} reports key metrics.
+
+\begin{table*}[t]
+\centering
+\caption{The $2 \times 2$ factorial: log-probability reference (fresh vs.\ stale) crossed with clip threshold (tight vs.\ none).
+ESS and entropy are reported as ranges over the training run (early $\to$ late).
+``Collapse'' indicates training instability within the first 50 rollouts.
+Only the stale + tight-clip condition produces increased exploration without collapse.}
+\label{tab:factorial}
+\small
+\begin{tabular}{@{}llcccc@{}}
+\toprule
+\textbf{Log-probs} & \textbf{Clip $\varepsilon$} & \textbf{ESS} & \textbf{Entropy} & \textbf{Reward} & \textbf{pg\_clipfrac} \\
+\midrule
+Fresh & $0.05$ & $0.999$ & $0.20 \to 0.24$ & $0.13 \to 0.15$ & $0.0$ \\
+Fresh & $10^6$ (none) & \multicolumn{3}{c}{Collapse within $\sim$50 rollouts} & N/A \\
+Stale & $0.05$ & $0.999 \to 0.997$ & $0.28 \to 1.19$ ($4\times$) & $0.18 \to 0.20$ & $0.01 \to 0.04$ \\
+Stale & $10^6$ (none) & $0.956$--$0.988$ & Unstable & Degrading & N/A \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+Several findings emerge from this design:
+
+\paragraph{Synergistic interaction, not additive effects.}
+Neither factor alone produces the entropy increase observed in the stale + tight-clip condition.
+Fresh log-probabilities with tight clipping (row~1) yield flat entropy ($0.20 \to 0.24$) and zero clipping activity---the tight threshold cannot bind when the importance ratio is architecturally near unity.
+Stale log-probabilities without clipping (row~4) produce an unstable training trajectory with degrading reward, as unconstrained importance ratios amplify off-policy errors.
+Only when both factors are combined does a qualitatively different regime emerge: entropy increases fourfold ($0.28 \to 1.19$) while ESS remains above $0.997$ and reward improves.
+This is a genuine interaction effect, not an additive combination.
+
+\paragraph{Clipping is active at all step positions.}
+In the stale + tight-clip condition, \texttt{pg\_clipfrac} is nonzero at every step position within each rollout, rising from $0.001$ at step~1 to $0.024$ at step~8.
+This gradient across step positions reflects the progressive accumulation of policy drift within a rollout: later training steps operate on data that is increasingly stale relative to the current policy, activating the clip constraint more frequently.
+Over 186 rollouts, clipping activity rises from $1.4\%$ to $4.4\%$ as training progresses, confirming that the trust region is genuinely binding and modulating the optimization.
+
+\paragraph{Clipping is necessary under off-policyness.}
+The fresh + no-clip condition collapses within approximately 50 rollouts, while the stale + no-clip condition exhibits ESS values as low as $0.956$ with unstable dynamics.
+Clipping---when actually active---provides a meaningful stability guarantee that is absent in the standard (inert) configuration only because the on-policy regime makes it unnecessary.
+
+\subsection{Long-Horizon Behavior}
+\label{sec:long-horizon}
+
+The 186-rollout factorial results suggest that activated clipping promotes exploration and improves reward.
+To assess whether these gains are sustained, we extend the stale + tight-clip condition to 310 rollouts (approximately 1,100 training steps at $\text{lr} = 10^{-5}$).
+
+\paragraph{Stability is maintained.}
+ESS remains in the range $0.988$--$0.999$ throughout the extended run, with no off-policy collapse.
+This confirms that tight clipping ($\varepsilon = 0.05$) effectively constrains policy drift even over substantially longer training horizons.
+
+\paragraph{Exploration persists.}
+Entropy continues to exhibit high-entropy cycling with spikes reaching $1.37$, indicating sustained exploration of diverse strategies.
+The model does not converge to a narrow mode, in contrast to the entropy-decreasing trajectories typical of standard GRPO training.
+
+\paragraph{Reward does not sustain improvement.}
+Reward peaks at $0.305$ around rollout~834, then gradually declines to $0.02$--$0.07$ by rollout~1,110.
+Concurrently, the truncation rate climbs from $14\%$ to $48\%$, indicating that the model increasingly generates responses that exceed the maximum sequence length without producing valid solutions.
+
+\paragraph{Interpretation.}
+Activated clipping successfully promotes exploration and provides an initial reward improvement, confirming that the trust region mechanism is functioning as intended.
+However, it is insufficient for sustained learning: the model explores more diverse strategies but does not reliably converge to better ones.
+The reward decline suggests that exploration without a complementary convergence mechanism---such as a learned value function, reward shaping, or curriculum design---eventually leads the model into low-reward regions of the policy space from which group-relative advantages alone cannot recover.
+
+We view this as an informative boundary result rather than a failure of the approach.
+It delineates what PPO clipping can and cannot accomplish when properly activated: clipping constrains the \emph{rate} of policy change per step, but it does not guide the \emph{direction} of exploration.
+In the standard GRPO setting, this limitation is invisible because clipping never fires.
+Activating it reveals the need for additional mechanisms that standard on-policy GRPO happens to avoid by not exploring aggressively.
+
+\subsection{Learning Rate Sensitivity}
+\label{sec:lr-sensitivity}
+
+The stale-logprobs fix does not broaden GRPO's stability regime with respect to learning rate.
+We evaluate two additional configurations at $\text{lr} = 5 \times 10^{-5}$:
+
+\begin{itemize}
+    \item \textbf{$\varepsilon = 0.05$:} Entropy explodes within 50 rollouts, and the model degenerates into repetitive outputs (e.g., \texttt{"n n n \ldots"}), with reward collapsing to zero.
+    The learning rate induces per-step policy changes so large that even tight clipping cannot prevent mode collapse.
+
+    \item \textbf{$\varepsilon = 0.02$:} Entropy remains controlled, but the model suffers capability degradation, with reward declining from $0.05$ to $0.008$.
+    The extremely tight trust region prevents collapse but also prevents the model from making meaningful policy improvements.
+\end{itemize}
+
+These results establish that the stale-logprobs fix operates within GRPO's existing learning rate stability regime ($\text{lr} \leq 10^{-5}$), not as a license for more aggressive optimization.
+At learning rates where standard GRPO is already unstable, reconnecting the importance ratio amplifies rather than mitigates the instability, because the trust region now faithfully reports the (excessive) policy drift that conservative learning rates were implicitly suppressing.
+
+
+\section{Discussion}
+\label{sec:discussion}
+
+\subsection{Why Does GRPO Work Without Active Clipping?}
+\label{sec:why-grpo-works}
+
+If PPO clipping is architecturally inert, what provides GRPO's implicit regularization?
+Recent theoretical work offers a compelling answer.
+\citet{grpo-dpo2025} show that GRPO's group-relative objective is equivalent to an implicit contrastive loss, closely related to Direct Preference Optimization (DPO).
+Under this interpretation, the group-relative advantages---computed by normalizing rewards within each sample group---already implement a form of pairwise preference learning: the model is trained to increase the probability of higher-reward completions relative to lower-reward ones within the same group, rather than to maximize absolute reward.
+
+This contrastive structure provides implicit regularization through two mechanisms.
+First, the zero-mean property of group-relative advantages ensures that the net gradient across a group is balanced---some responses are upweighted while others are downweighted---preventing the runaway probability mass accumulation that PPO's trust region was designed to prevent.
+Second, the within-group normalization ties the magnitude of policy updates to the reward \emph{variance} within each group, naturally attenuating updates when the model is already performing uniformly (all completions receive similar rewards).
+
+This explains two otherwise puzzling observations.
+RGRA~\citep{rgra2025} can remove clipping entirely without performance loss, because the contrastive objective already provides the stability guarantee that clipping was supposed to enforce.
+Conversely, our finding that the no-clip ablation collapses under stale log-probabilities (Section~\ref{sec:factorial}) is consistent with this explanation: when the importance ratio is disconnected from data staleness, the contrastive structure is sufficient; when genuinely off-policy data is introduced, it is not, and an explicit trust region becomes necessary.
+
+\subsection{When Does Clipping Matter?}
+\label{sec:when-clipping-matters}
+
+Our results identify a precise boundary: clipping becomes necessary when training data is genuinely off-policy relative to the current model.
+This condition arises in several practical scenarios:
+
+\begin{itemize}
+    \item \textbf{Aggressive data reuse:} Replaying rollout buffers across multiple training iterations, as in experience replay variants of RLHF.
+    \item \textbf{Asynchronous training:} When rollout generation and policy optimization proceed concurrently, the policy may update substantially between data generation and training.
+    \item \textbf{Multi-policy frameworks:} \citet{prosperity2025} report that at staleness $s = 256$, clipping activity rises to $1.22\%$---still low, but nonzero and increasing with staleness.
+\end{itemize}
+
+Our stale-logprobs experiment introduces controlled off-policyness in a single-policy setting, providing a clean test of clipping's role.
+The result is unambiguous: without clipping, stale-logprob training collapses within approximately 50 rollouts; with tight clipping, training remains stable for over 300 rollouts.
+Clipping is not merely a theoretical safeguard under off-policyness---it is an empirically necessary one.
+
+\subsection{Practical Implications}
+\label{sec:practical-implications}
+
+Our findings have distinct implications for two categories of practitioners:
+
+\paragraph{Standard GRPO users.}
+If you train with fresh rollouts and conservative learning rates ($\text{lr} \leq 10^{-5}$), your clipping mechanism is doing nothing.
+This is acceptable---the contrastive structure of group-relative advantages provides sufficient regularization, and removing clipping (as in RGRA) would produce identical training dynamics.
+Practitioners in this regime should not expect clipping-related hyperparameters ($\varepsilon$, asymmetric bounds) to affect training outcomes.
+
+\paragraph{Aggressive data-reuse settings.}
+If your training pipeline introduces genuine off-policyness---through stale rollout buffers, asynchronous updates, or multi-policy sampling---you need a trust-region mechanism that actually functions.
+Several options exist:
+\begin{enumerate}[label=(\alph*)]
+    \item \textbf{Stale log-probs with tight clipping} (our approach): simple to implement as a one-line change, but with limited long-term reward improvement (Section~\ref{sec:long-horizon}).
+    \item \textbf{Sequence-level importance sampling} (GSPO; \citealt{gspo2025}): operates at the response level rather than token level, avoiding the high variance of token-level IS.
+    \item \textbf{Second-moment masking} (M2PO; \citealt{m2po2025}): uses variance of importance ratios to identify and mask unreliable tokens.
+    \item \textbf{Quadratic divergence penalties} (CFPO; \citealt{cfpo2025}): replaces the hard clip with a smooth penalty that avoids the zero-gradient problem.
+\end{enumerate}
+The choice among these approaches depends on the specific source of off-policyness and the acceptable implementation complexity.
+Our contribution is diagnostic rather than prescriptive: we establish \emph{why} the standard mechanism fails, enabling informed selection among alternatives.
+
+\subsection{Limitations}
+\label{sec:limitations}
+
+Several limitations constrain the generality of our findings.
+
+\paragraph{Single model and domain.}
+All experiments use Qwen2.5-Math-1.5B on mathematical reasoning tasks.
+While our core finding (zero clipping activity) is consistent with measurements by \citet{chen2025iclr} on Qwen2.5-Math-7B and by \citet{prosperity2025} across multiple model scales and domains, the long-horizon behavior of the stale-logprobs fix has not been validated at larger scales or on non-mathematical tasks.
+
+\paragraph{Reward decline under activated clipping.}
+The stale + tight-clip configuration shows reward decline after approximately 800 rollouts (Section~\ref{sec:long-horizon}), limiting its practical value as a standalone fix.
+We are transparent that this represents an incomplete solution to the off-policy GRPO problem.
+
+\paragraph{No head-to-head comparison.}
+We do not directly compare the stale-logprobs fix against DAPO, GSPO, or other recent algorithms on the same benchmark, making it difficult to rank the approaches in terms of downstream task performance.
+
+\paragraph{Checkpoint artifacts.}
+All experiments resume from a pre-trained checkpoint at iteration~799, which carries optimizer state from prior training.
+While we control for learning-rate contamination via \texttt{--no-load-optim}, residual effects of the checkpoint's training history cannot be fully excluded.
+
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+PPO clipping in GRPO is architecturally inert.
+Across all standard configurations we tested---varying PPO epochs, learning rates, and data-reuse strategies---the clipped surrogate objective reduces to the unclipped objective exactly, with the clip operator never binding.
+We trace this inertness to two independent causes: (1)~the recomputation of log-probabilities in the PPO loss, which disconnects the importance ratio from data staleness, and (2)~conservative learning rates that keep per-step policy changes below the clip threshold even when the ratio is correctly computed.
+
+This diagnosis provides a unifying explanation for the proliferation of clipping redesigns in recent work.
+DAPO's asymmetric bounds, GSPO's sequence-level importance sampling, CFPO's quadratic penalty, ASPO's inverted ratios, and RGRA's outright removal of clipping are all responses---from different angles---to the same underlying pathology: a trust-region mechanism that never engages.
+The redesigns succeed not because they improve clipping, but because they either replace it with an alternative that functions (GSPO, CFPO) or acknowledge its redundancy (RGRA).
+
+We show that reconnecting the importance ratio to the data-generating policy via stale rollout log-probabilities, combined with a tight clip threshold, activates the trust region and produces a qualitatively different training regime---one characterized by sustained exploration and initial reward improvement.
+However, activated clipping alone is insufficient for long-term learning: reward declines after approximately 800 rollouts, revealing that the trust region constrains the rate of policy change but does not guide its direction.
+This points to the need for complementary mechanisms---value functions, reward shaping, or curriculum design---in any off-policy extension of GRPO.
+
+The broader lesson is methodological.
+When a safety mechanism is structurally prevented from firing, its presence creates a false sense of security while its hyperparameters become unidentifiable nuisance parameters.
+Diagnosing this structural inertness is a prerequisite for principled algorithm design, whether the goal is to fix the mechanism, replace it, or remove it.

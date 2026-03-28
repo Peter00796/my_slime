@@ -1,0 +1,61 @@
+\documentclass[11pt]{article}
+
+% ── Core packages ──
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{float}
+\usepackage{enumitem}
+\usepackage{microtype}
+\usepackage{natbib}
+
+% ── Hyperref setup ──
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!60!black,
+  citecolor=blue!60!black,
+  urlcolor=blue!60!black
+}
+
+\title{Why PPO Clipping Is Inert in GRPO:\\
+Diagnosing the Architectural Disconnection\\
+Between Trust Regions and Data Staleness}
+
+\author{
+  Yanxin Peng \\
+  University of Southern California \\
+  \texttt{yanxinpe@usc.edu}
+}
+
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Group Relative Policy Optimization (GRPO) inherits PPO's clipped surrogate objective as a trust-region mechanism.
+Multiple recent works have redesigned this mechanism (DAPO, GSPO, ASPO, CFPO) or removed it entirely (RGRA), citing entropy collapse, training instability, or expendability.
+We provide a unifying diagnosis: \textbf{PPO clipping is architecturally inert in standard GRPO training} because the importance ratio uses recomputed log-probabilities, keeping it near unity regardless of data staleness (\texttt{pg\_clipfrac}$\,{=}\,0$).
+Using Effective Sample Size (ESS) as a principled offlineness metric, we trace this inactivity to two independent causes: (1)~the PPO loss recomputes its reference log-probs each step, and (2)~conservative learning rates limit per-step policy drift.
+We show that reconnecting clipping to data staleness (via stale rollout log-probs) activates the mechanism and produces a $4\times$ entropy increase---but also reveal that activated clipping alone is insufficient for sustained reward improvement over long training horizons.
+Our analysis explains why recent clipping redesigns were necessary and why clipping removal was viable, providing a unified lens on an active area of algorithmic development.
+\end{abstract}
+
+%% ── Sections ──
+\input{sections1_2}
+\input{section3}
+\input{sections4_5_6}
+
+%% ── References ──
+% TODO: Create references.bib with proper keys
+% \bibliographystyle{plainnat}
+% \bibliography{references}
+
+\end{document}
