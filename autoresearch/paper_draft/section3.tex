@@ -1,0 +1,152 @@
+%% Section 3: The Inert Clipping Problem
+%% To be included in main paper via \input{section3}
+
+\section{The Inert Clipping Problem}
+\label{sec:inert-clipping}
+
+PPO's clipped surrogate objective is the central trust-region mechanism inherited by GRPO.
+In this section, we demonstrate that this mechanism is empirically inert across all standard training configurations we tested, identify two independent root causes, and show how this diagnosis unifies a series of recent algorithmic redesigns.
+
+\subsection{Measuring Clipping Activity}
+\label{sec:measuring-clipping}
+
+We instrument the PPO loss to track \texttt{pg\_clipfrac}, the fraction of tokens at which the clipped and unclipped objectives differ---i.e., the fraction of tokens where clipping actively modifies the gradient.
+A value of $\texttt{pg\_clipfrac} = 0$ means the clip operator in Equation~\ref{eq:ppo-clip} is never binding: for every token, $\text{clip}(r_t, 1-\varepsilon, 1+\varepsilon) \cdot \hat{A}_t = r_t \cdot \hat{A}_t$, and the trust-region constraint contributes nothing to the optimization.
+
+\paragraph{Setup.}
+We train Qwen2.5-Math-1.5B on the DAPO-Math-17K dataset under standard GRPO configurations, resuming from a checkpoint at iteration~799.
+All runs use the default clip threshold $\varepsilon = 0.2$.
+We additionally track the Effective Sample Size (ESS), defined as
+\begin{equation}
+\label{eq:ess}
+\text{ESS} = \frac{1}{\sum_{i} w_i^2}, \quad w_i = \frac{r_i}{\sum_j r_j},
+\end{equation}
+where $r_i = \pi_\theta(a_i \mid s) / \pi_{\text{old}}(a_i \mid s)$ are the per-token importance ratios.
+ESS measures how many effective independent samples remain after importance weighting; $\text{ESS} \approx 1.0$ indicates near-perfect on-policy training.
+
+\paragraph{PPO epochs do not activate clipping.}
+At $\text{lr} = 10^{-6}$, we vary the number of PPO epochs $K \in \{1, 3, 5\}$.
+In standard GRPO, multiple PPO epochs recompute log-probabilities at the start of each epoch, resetting the importance ratio denominator.
+Across all three settings, $\texttt{pg\_clipfrac} = 0.0$ exactly, and $\text{ESS} = 0.999$.
+Increasing the number of optimization passes over the same rollout data does not induce any clipping activity.
+
+\paragraph{Data reuse does not activate clipping.}
+We increase the learning rate to $10^{-5}$ and set \texttt{--num-steps-per-rollout}$\,{=}\,8$, which partitions each rollout into 8 non-overlapping training chunks processed sequentially \emph{without} recomputing log-probabilities between steps.
+This is the most aggressive data-reuse configuration in our experimental grid.
+Even here, $\texttt{pg\_clipfrac} = 0.0$ at every step position, and ESS remains above $0.999$.
+
+\paragraph{Comparison with prior observations.}
+Our finding of exactly zero clipping is consistent with, but more extreme than, prior reports.
+\citet{chen2025iclr} measure $\texttt{pg\_clipfrac} < 0.2\%$ on Qwen2.5-Math-7B at $\text{lr} = 5 \times 10^{-7}$, attributing the low rate to conservative hyperparameters.
+\citet{prosperity2025} report $\texttt{pg\_clipfrac} = 0.05\%$ at staleness $s = 0$ in their multi-policy framework.
+Neither work investigates why the rate is near zero or identifies the architectural cause.
+The small residual clipping they observe likely reflects numerical differences in their pipelines (larger models, different checkpoint states, or floating-point accumulation effects), but the qualitative conclusion is the same: \emph{clipping is essentially inactive in standard GRPO training}.
+
+
+\subsection{Root Cause: Two Independent Mechanisms}
+\label{sec:root-cause}
+
+We identify two independent mechanisms that jointly render PPO clipping inert.
+Their independence is important: removing either one alone is sufficient to produce nonzero clipping activity.
+
+\subsubsection{Cause 1: Architectural Disconnection}
+\label{sec:cause-architectural}
+
+The PPO clipped surrogate objective computes the importance ratio as
+\begin{equation}
+\label{eq:importance-ratio}
+r_t(\theta) = \frac{\pi_\theta(a_t \mid s_t)}{\pi_{\text{old}}(a_t \mid s_t)},
+\end{equation}
+where, in classical PPO, $\pi_{\text{old}}$ represents the \emph{behavior policy} that generated the data.
+In GRPO as implemented in standard training frameworks, the denominator uses \texttt{batch["log\_probs"]}---log-probabilities \emph{recomputed} from the current model at the start of each training step---rather than \texttt{batch["rollout\_log\_probs"]}, the log-probabilities recorded at rollout generation time.
+
+This architectural choice means that both numerator and denominator of $r_t(\theta)$ track the same policy (or very nearly so, differing only by the gradient updates within a single step).
+Consequently, $r_t(\theta) \approx 1$ regardless of how far the current policy $\pi_\theta$ has drifted from the policy $\pi_{\text{rollout}}$ that actually generated the training data.
+The importance ratio is \emph{disconnected} from data staleness: the PPO loss cannot detect, and therefore cannot constrain, policy drift relative to the data-generating distribution.
+
+\subsubsection{Cause 2: Conservative Learning Rates}
+\label{sec:cause-lr}
+
+Standard GRPO training uses learning rates in the range $10^{-6}$ to $10^{-5}$.
+At these rates, the per-step change in log-probabilities is small enough that even a correctly computed importance ratio (using stale rollout log-probs) would rarely exceed the clip threshold $1 + \varepsilon = 1.2$.
+This provides a second, independent barrier to clipping activation: the policy simply does not move fast enough within a single rollout's training steps for the trust region to bind.
+
+\subsubsection{Evidence for Independence}
+\label{sec:evidence-independence}
+
+We isolate the two causes by introducing a \texttt{--use-rollout-logprobs} flag that replaces the denominator of $r_t(\theta)$ with the stale rollout log-probabilities, removing Cause~1 while leaving Cause~2 intact.
+At $\text{lr} = 10^{-5}$ with \texttt{--num-steps-per-rollout}$\,{=}\,8$:
+
+\begin{itemize}
+    \item \textbf{With stale log-probs} (Cause~1 removed): We observe a clear ESS gradient within each rollout, declining from $0.999$ at step~1 to $0.988$ at step~8.
+    The variable \texttt{pg\_clipfrac} is nonzero at \emph{all} step positions, rising from $0.001$ (step~1) to $0.024$ (step~8) as accumulated policy drift pushes more tokens past the clip threshold.
+    Over 218 rollouts, \texttt{pg\_clipfrac} is consistently positive.
+
+    \item \textbf{Without stale log-probs} (Cause~1 present): Under identical hyperparameters, $\texttt{pg\_clipfrac} = 0.0$ at every step position regardless of $N$.
+    The recomputed denominator masks all policy drift.
+\end{itemize}
+
+This contrast establishes that Cause~1 and Cause~2 are independent.
+Removing the architectural disconnection (Cause~1) is \emph{sufficient} to activate clipping even at the conservative learning rate of $10^{-5}$---the rate merely modulates the \emph{magnitude} of clipping activity, not its presence.
+Conversely, increasing the learning rate alone (without fixing the log-prob reference) cannot activate clipping, because the recomputed denominator absorbs all policy changes.
+
+
+\subsection{Implications for Recent Algorithmic Redesigns}
+\label{sec:implications}
+
+Our diagnosis provides a unifying explanation for a striking pattern in recent work: at least six independent papers have redesigned or removed GRPO's clipping mechanism, each motivated by different empirical observations, yet all responding to the same underlying pathology.
+Table~\ref{tab:related-redesigns} summarizes how each algorithm's design choice relates to our two-cause diagnosis.
+
+\begin{table*}[t]
+\centering
+\caption{Recent clipping redesigns interpreted through the lens of inert clipping.
+Each modification addresses a symptom of the same root cause: the PPO importance ratio is architecturally near unity, rendering clipping inactive.
+``Fresh log-probs'' indicates the algorithm retains the recomputed denominator (Cause~1 unresolved).}
+\label{tab:related-redesigns}
+\small
+\begin{tabular}{@{}p{2.0cm}p{4.5cm}p{7.5cm}@{}}
+\toprule
+\textbf{Algorithm} & \textbf{Modification} & \textbf{Our Explanation} \\
+\midrule
+DAPO \newline \citep{dapo2025}
+& Asymmetric clip bounds ($\varepsilon_{\text{low}} = 0.2$, $\varepsilon_{\text{high}} = 0.28$)
+& Presupposes active clipping.
+  If $\texttt{pg\_clipfrac} = 0$, Clip-Higher has no tokens to asymmetrically clip.
+  Their reported gains (+8 AIME) are attributable to Dynamic Sampling, not the clip modification (+2 AIME). \\
+\addlinespace
+GSPO \newline \citep{gspo2025}
+& Sequence-level importance sampling replacing token-level
+& Retains fresh log-probs; Cause~1 persists.
+  Their finding that GSPO clips $100\times$ more tokens than standard GRPO directly supports our diagnosis: GRPO clips almost nothing. \\
+\addlinespace
+CFPO \newline \citep{cfpo2025}
+& Quadratic TV-divergence penalty replacing clip
+& Their penalty term is also approximately zero when $r_t \approx 1$.
+  The zero-gradient problem they address only manifests after ratios deviate from unity---which requires resolving our upstream Cause~1 first. \\
+\addlinespace
+ASPO \newline \citep{aspo2025}
+& Inverted IS ratios for positive-advantage tokens
+& They report average IS weight $\approx 1.0004$ but do not investigate this observation.
+  Their gradient-direction fix has negligible magnitude when $r_t \approx 1$; the effective update is dominated by the advantage term alone. \\
+\addlinespace
+RGRA \newline \citep{rgra2025}
+& Remove clipping entirely; use plain REINFORCE with group advantages
+& Our finding provides the mechanistic explanation for their empirical result: clipping is removable because it was already absent.
+  Removing a no-op preserves performance by construction. \\
+\addlinespace
+\citet{chen2025iclr}
+& Analyze clipping as entropy regularizer; recommend removal
+& Their conclusion is correct in the fresh-log-prob regime (Cause~1 present).
+  However, under stale log-probs where clipping becomes active, we find it is essential: our no-clip ablation with stale log-probs collapses within 50 rollouts (Section~\ref{sec:factorial}). \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+The convergent pattern across these works is notable.
+Each paper identifies a problem with GRPO's clipping---it does not prevent entropy collapse (DAPO), it operates at the wrong granularity (GSPO), it creates dead zones (CFPO), it misallocates gradients (ASPO), or it is simply unnecessary (RGRA)---and proposes an independent fix.
+Our diagnosis reveals these as facets of a single phenomenon: the importance ratio is architecturally constrained to near unity, so the clip operator is never binding.
+Under this lens, the modifications fall into two categories: those that \emph{work around} inert clipping by introducing alternative regularization (GSPO, CFPO), and those that \emph{acknowledge} its inertness by simplifying the objective (RGRA, \citealt{chen2025iclr}).
+Neither category addresses the upstream cause---the disconnection between the importance ratio and data staleness.
+
+This suggests that a more principled path forward is to \emph{reconnect} the importance ratio to the data-generating policy, making clipping functional as originally intended.
+We pursue this direction in Section~\ref{sec:activating-clipping}, where we show that the combination of stale rollout log-probabilities and tight clipping produces a qualitatively different training regime---one in which clipping actively promotes exploration rather than serving as a dormant safety constraint.
