@@ -1,0 +1,136 @@
+%% Sections 1--2: Introduction and Background
+%% To be included in main paper via \input{sections1_2}
+
+\section{Introduction}
+\label{sec:introduction}
+
+Group Relative Policy Optimization \citep[GRPO;][]{deepseekr1} has emerged as the dominant reinforcement learning algorithm for large language model reasoning, powering systems such as DeepSeek-R1 \citep{deepseekr1}, Qwen \citep{qwen2025}, and their derivatives.
+GRPO inherits the clipped surrogate objective from Proximal Policy Optimization \citep[PPO;][]{schulman2017ppo}---a trust-region mechanism designed to prevent destructive policy updates by bounding the importance sampling ratio between the current and data-generating policies.
+This mechanism is widely regarded as essential to training stability.
+
+Yet a striking pattern has emerged in the recent literature: at least six independent works have redesigned or removed this clipping mechanism, each from a different empirical motivation, and each reporting comparable or improved results.
+DAPO \citep{dapo2025} introduces asymmetric clip bounds (\emph{Clip-Higher}) to mitigate entropy collapse.
+GSPO \citep{gspo2025} replaces token-level importance sampling with sequence-level ratios, arguing the token-level formulation is ``fundamentally broken.''
+CFPO \citep{cfpo2025} substitutes clipping with a quadratic TV-divergence penalty to eliminate dead-zone gradients.
+ASPO \citep{aspo2025} inverts the importance ratio for positive-advantage tokens to correct gradient misallocation.
+RGRA \citep{rgra2025} removes clipping entirely, retaining plain REINFORCE with group-relative advantages, and matches or exceeds GRPO performance.
+\citet{chen2025iclr} analyze clipping as an implicit entropy regularizer and recommend its removal.
+All of these modifications work.
+The natural question is: \emph{why did each become necessary?}
+
+\paragraph{Our answer.}
+We provide a unifying diagnosis.
+By instrumenting the PPO loss to track \texttt{pg\_clipfrac}---the fraction of tokens at which the clipped and unclipped objectives differ---we find that this quantity is \emph{exactly zero} across all standard GRPO training configurations we tested.
+The clip operator in the PPO surrogate never binds: for every token, the clipped objective equals the unclipped objective, and the trust-region mechanism contributes nothing to the optimization.
+
+The root cause is an architectural disconnection between the importance ratio and data staleness.
+In classical PPO, the ratio denominator is the behavior policy that generated the training data.
+In GRPO as implemented in standard frameworks (TRL, SLIME, veRL), the denominator uses log-probabilities \emph{recomputed} from the current model at each training step.
+Since both numerator and denominator track the same policy, the ratio remains near unity regardless of how far the model has drifted from the policy that generated the rollout data.
+We identify two independent causes: (1)~this recomputation of log-probabilities resets the ratio, and (2)~conservative learning rates ($10^{-6}$--$10^{-5}$) limit per-step policy change.
+Either cause alone is sufficient to keep clipping inactive; together, they render it entirely inert.
+
+\paragraph{Activating clipping: a controlled experiment.}
+We introduce a \texttt{--use-rollout-logprobs} flag that replaces the ratio denominator with the stale rollout log-probabilities, reconnecting the importance ratio to the data-generating distribution.
+Combined with tight clipping ($\varepsilon = 0.05$), this is the only configuration in our experimental grid that produces entropy \emph{increase} during training: entropy rises fourfold (from 0.28 to 1.19) while reward initially improves.
+However, extended training over 310 rollouts reveals gradual reward decline---the model explores more diverse strategies but does not converge to better ones.
+This is itself informative: it demonstrates that clipping is \emph{necessary but not sufficient} under genuine off-policyness, and that complementary mechanisms are needed for sustained improvement.
+
+\paragraph{Contributions.}
+Our contributions are:
+\begin{enumerate}
+    \item The first empirical measurement of clipping inactivity in GRPO training ($\texttt{pg\_clipfrac} = 0$) and identification of its architectural root cause: the PPO importance ratio uses recomputed log-probabilities that are disconnected from data staleness.
+
+    \item The introduction of Effective Sample Size (ESS) as a principled offlineness metric for GRPO, providing a continuous measure of the divergence between the current policy and the data-generating distribution.
+
+    \item A unifying diagnosis that explains why six independent recent works \citep{dapo2025,gspo2025,cfpo2025,aspo2025,rgra2025,chen2025iclr} each found it necessary to redesign or remove GRPO's clipping mechanism.
+
+    \item A controlled factorial experiment showing what happens when clipping is activated: entropy increases and clipping engages as intended, but sustained reward improvement requires mechanisms beyond clipping alone.
+\end{enumerate}
+
+\paragraph{Relation to prior observations.}
+Several prior works have noted symptoms of clipping inactivity without identifying the cause.
+\citet{chen2025iclr} measure $\texttt{pg\_clipfrac} < 0.2\%$ on Qwen2.5-Math-7B at $\text{lr} = 5 \times 10^{-7}$ but attribute the low rate to conservative hyperparameters.
+\citet{prosperity2025} report $\texttt{pg\_clipfrac} = 0.05\%$ at staleness $s = 0$ in their multi-policy framework but do not investigate the root cause.
+\citet{grpo_secretly_prm} note that the importance ratio equals unity when the number of PPO epochs $\mu = 1$, and \citet{lambert2025} observes that clipping is ``irrelevant'' in this setting.
+A TRL user reported $r_t = 1$ in issue \#2769, which the community dismissed as expected behavior.\footnote{\url{https://github.com/huggingface/trl/issues/2769}}
+Our contribution is the causal diagnosis---the recomputation of log-probabilities in the PPO loss---and a controlled experiment demonstrating what changes when clipping is made functional.
+
+
+\section{Background}
+\label{sec:background}
+
+\subsection{GRPO and the PPO Clipped Objective}
+\label{sec:bg-grpo}
+
+Group Relative Policy Optimization \citep{deepseekr1} generates multiple candidate responses $\{y_1, \dots, y_G\}$ for each prompt $x$ and computes \emph{group-relative advantages}: for each response $y_i$, the advantage $\hat{A}_i$ is derived from the reward $R(x, y_i)$ relative to the group statistics (mean and, optionally, standard deviation) of $\{R(x, y_j)\}_{j=1}^G$.
+This eliminates the need for a learned value function, which is a primary source of instability and computational cost in standard PPO for language models.
+
+The policy is then updated using PPO's clipped surrogate objective, applied at the token level.
+For a token $a_t$ generated in context $s_t$, the loss is
+\begin{equation}
+\label{eq:ppo-clip}
+\mathcal{L}^{\text{CLIP}}_t(\theta) = -\min\!\Big( r_t(\theta)\,\hat{A}_t,\; \text{clip}\big(r_t(\theta),\, 1{-}\varepsilon,\, 1{+}\varepsilon\big)\,\hat{A}_t \Big),
+\end{equation}
+where $\varepsilon$ is the clip threshold (typically $0.2$) and $r_t(\theta)$ is the importance sampling ratio
+\begin{equation}
+\label{eq:is-ratio}
+r_t(\theta) = \frac{\pi_\theta(a_t \mid s_t)}{\pi_{\text{old}}(a_t \mid s_t)}.
+\end{equation}
+When $\hat{A}_t > 0$, the clip operator caps the ratio at $1 + \varepsilon$, preventing excessively large upward updates; when $\hat{A}_t < 0$, it floors the ratio at $1 - \varepsilon$, preventing the policy from moving too far away from dispreferred actions in a single step.
+The fraction of tokens at which the clipped and unclipped terms in Equation~\ref{eq:ppo-clip} differ---denoted \texttt{pg\_clipfrac}---measures how often this trust-region constraint is active.
+
+DAPO \citep{dapo2025} modifies this with asymmetric bounds ($\varepsilon_{\text{low}} = 0.2$, $\varepsilon_{\text{high}} = 0.28$), allowing the policy to move further toward preferred actions than away from dispreferred ones.
+The standard GRPO training loop additionally includes a per-token KL penalty against a reference policy $\pi_{\text{ref}}$, which we hold fixed in all experiments.
+
+
+\subsection{The Three Log-Probability References}
+\label{sec:bg-three-logprobs}
+
+Understanding why clipping is inert requires distinguishing three log-probability quantities that coexist in GRPO training.
+We define them precisely, as conflation of these quantities is the source of the architectural disconnection we diagnose.
+
+\begin{enumerate}
+    \item \textbf{Rollout log-probabilities} ($\log \pi_{\text{rollout}}$): computed at data generation time, when the model produces candidate responses for each prompt.
+    These represent the actual \emph{behavior policy}---the distribution from which the training data was sampled.
+    In code, these are stored as \texttt{batch["rollout\_log\_probs"]}.
+
+    \item \textbf{Old log-probabilities} ($\log \pi_{\text{old}}$): recomputed from the current model at the start of each training step (or PPO epoch).
+    In code, these are stored as \texttt{batch["log\_probs"]}.
+    In standard GRPO implementations, this quantity serves as the denominator of the importance ratio in Equation~\ref{eq:is-ratio}.
+
+    \item \textbf{Current log-probabilities} ($\log \pi_\theta$): the model's output during the forward pass of the training step.
+    This serves as the numerator of the importance ratio.
+\end{enumerate}
+
+The critical distinction is the identity of $\pi_{\text{old}}$ in Equation~\ref{eq:is-ratio}.
+In classical PPO \citep{schulman2017ppo}, $\pi_{\text{old}} = \pi_{\text{rollout}}$: the ratio denominator is the behavior policy that generated the data, and the ratio measures how far the current policy has moved from the data-generating distribution.
+In GRPO as implemented in standard frameworks---including TRL,\footnote{\url{https://github.com/huggingface/trl}} veRL \citep{verl2024}, and SLIME---$\pi_{\text{old}} = \pi_{\theta_{\text{step-start}}}$: the log-probabilities are recomputed from the current model parameters at the beginning of each training step.
+This means both the numerator ($\pi_\theta$) and denominator ($\pi_{\text{old}}$) of $r_t(\theta)$ track the same underlying policy, differing only by the parameter updates accumulated during a single gradient step.
+The importance ratio is therefore \emph{architecturally near unity}, regardless of how far $\pi_\theta$ has drifted from the rollout policy $\pi_{\text{rollout}}$.
+
+This substitution disconnects the PPO trust region from data staleness.
+The clipped objective in Equation~\ref{eq:ppo-clip} constrains how far $\pi_\theta$ moves from $\pi_{\text{old}}$---but since $\pi_{\text{old}}$ is reset to $\pi_\theta$ at each step, the constraint is vacuous.
+The policy may drift arbitrarily far from the data-generating distribution $\pi_{\text{rollout}}$ without the clipping mechanism ever detecting or constraining this drift.
+
+
+\subsection{Offlineness Metrics}
+\label{sec:bg-offlineness}
+
+To quantify the divergence between the current policy and the data-generating distribution, we employ the \textbf{Effective Sample Size} (ESS), a standard diagnostic in importance sampling \citep{kong1992ess,liu2001mc}:
+\begin{equation}
+\label{eq:ess}
+\text{ESS} = \frac{\big(\sum_{i} w_i\big)^2}{\sum_{i} w_i^2}, \quad w_i = \frac{\pi_\theta(a_i \mid s_i)}{\pi_{\text{rollout}}(a_i \mid s_i)},
+\end{equation}
+where the weights $w_i$ are the importance ratios computed against the \emph{rollout} policy (not the recomputed $\pi_{\text{old}}$).
+Normalized to the interval $[0, 1]$, $\text{ESS} \approx 1.0$ indicates that the current policy closely matches the data-generating distribution (near on-policy training), while $\text{ESS} \ll 1.0$ indicates severe off-policyness---the training data is unrepresentative of the current policy, and importance-weighted estimates will have high variance.
+
+We additionally track three complementary metrics:
+\begin{itemize}
+    \item \textbf{Mismatch KL} ($D_{\chi^2}$): a chi-squared divergence proxy measuring distributional mismatch between $\pi_\theta$ and $\pi_{\text{rollout}}$.
+    \item \textbf{Clip fraction} (\texttt{clip\_frac\_02}): the fraction of per-token importance weights $w_i$ falling outside the interval $[0.8, 1.2]$, providing a threshold-based staleness indicator.
+    \item \textbf{Maximum ratio} (\texttt{max\_ratio}): the largest importance weight $\max_i w_i$, capturing extreme off-policy tokens that may destabilize training.
+\end{itemize}
+
+These metrics are computed using rollout log-probabilities as the reference, ensuring they reflect actual data staleness rather than the artificial near-unity ratios produced by the recomputed $\pi_{\text{old}}$.
+The distinction between ESS (which uses $\pi_{\text{rollout}}$) and \texttt{pg\_clipfrac} (which uses recomputed $\pi_{\text{old}}$) is central to our diagnosis: a training run can exhibit $\text{ESS} = 0.988$ (measurable off-policyness) while simultaneously showing $\texttt{pg\_clipfrac} = 0$ (no clipping activity), precisely because the two metrics reference different denominators.
